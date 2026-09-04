@@ -61,19 +61,26 @@ func run() error {
 	}
 
 	toolServer := mcpserver.New(client, store)
-	mcpHandler := mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return toolServer.MCP() },
-		&mcp.StreamableHTTPOptions{
-			Stateless:                    true,
-			JSONResponse:                 true,
-			MaxRequestBodyBytes:          1 << 20,
-			PropagateRequestCancellation: true,
-		},
-	)
-	tokenHash := sha256.Sum256([]byte(cfg.AuthToken))
+	newMCPHandler := func(server *mcp.Server) http.Handler {
+		return mcp.NewStreamableHTTPHandler(
+			func(*http.Request) *mcp.Server { return server },
+			&mcp.StreamableHTTPOptions{
+				Stateless:                    true,
+				JSONResponse:                 true,
+				MaxRequestBodyBytes:          1 << 20,
+				PropagateRequestCancellation: true,
+			},
+		)
+	}
+	writerHandler := newMCPHandler(toolServer.MCP())
+	readOnlyHandler := newMCPHandler(toolServer.ReadOnlyMCP())
+	writerTokenHash := sha256.Sum256([]byte(cfg.AuthToken))
+	readOnlyTokenHash := sha256.Sum256([]byte(cfg.ReadOnlyAuthToken))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", health)
-	mux.Handle("/mcp", requireBearer(tokenHash, mcpHandler))
+	mux.Handle("/mcp", requireBearer(
+		writerTokenHash, readOnlyTokenHash, writerHandler, readOnlyHandler,
+	))
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
@@ -109,7 +116,12 @@ func health(response http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(response).Encode(map[string]any{"ok": true, "service": "hl-mcp"})
 }
 
-func requireBearer(expected [32]byte, next http.Handler) http.Handler {
+func requireBearer(
+	writerExpected [32]byte,
+	readOnlyExpected [32]byte,
+	writerHandler http.Handler,
+	readOnlyHandler http.Handler,
+) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		header := request.Header.Get("Authorization")
 		presented := ""
@@ -117,15 +129,22 @@ func requireBearer(expected [32]byte, next http.Handler) http.Handler {
 			presented = strings.TrimPrefix(header, "Bearer ")
 		}
 		presentedHash := sha256.Sum256([]byte(presented))
-		if presented == "" || subtle.ConstantTimeCompare(expected[:], presentedHash[:]) != 1 {
+		writerMatch := subtle.ConstantTimeCompare(writerExpected[:], presentedHash[:])
+		readOnlyMatch := subtle.ConstantTimeCompare(readOnlyExpected[:], presentedHash[:])
+
+		response.Header().Set("Cache-Control", "no-store")
+		switch {
+		case presented != "" && writerMatch == 1:
+			writerHandler.ServeHTTP(response, request)
+			return
+		case presented != "" && readOnlyMatch == 1:
+			readOnlyHandler.ServeHTTP(response, request)
+			return
+		default:
 			response.Header().Set("Content-Type", "application/json")
-			response.Header().Set("Cache-Control", "no-store")
 			response.WriteHeader(http.StatusUnauthorized)
 			_ = json.NewEncoder(response).Encode(map[string]string{"error": "unauthorized"})
-			return
 		}
-		response.Header().Set("Cache-Control", "no-store")
-		next.ServeHTTP(response, request)
 	})
 }
 

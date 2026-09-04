@@ -14,7 +14,7 @@ The server exposes account reads, market data, order placement, cancellation, an
 - Parent, take-profit, and stop-loss orders use one `normalTpsl` action.
 - Attached orders accept explicit `takeProfitLimitPrice` and `stopLossLimitPrice` execution bounds. If omitted, the server derives and reports a 5% bound from the formatted trigger.
 - Every trade mutation durably records its nonce and reconciliation identity before contacting `/exchange`.
-- One static bearer token protects the remote MCP endpoint.
+- Two distinct static bearer tokens protect the remote MCP endpoint. The writer token can call every tool. The read-only token can call only read tools.
 
 See [docs/research.md](docs/research.md) for the protocol decision and [docs/api-surface.md](docs/api-surface.md) for the official Hyperliquid API review.
 
@@ -60,7 +60,8 @@ Perp symbols use ccxt-compatible names for migration compatibility:
 |---|---:|---:|---|
 | `HL_WALLET_ADDRESS` | yes | — | Funded master account that `userRole` maps the signer to. |
 | `HL_PRIVATE_KEY` | yes | — | Trading/API wallet key. |
-| `MCP_AUTH_TOKEN` | yes | — | Remote bearer token, at least 32 characters. |
+| `MCP_AUTH_TOKEN` | yes | — | Writer bearer token, at least 32 characters. |
+| `MCP_READONLY_AUTH_TOKEN` | yes | — | Read-only bearer token, at least 32 characters and distinct from the writer token. |
 | `MAX_NOTIONAL_USD` | no | `3000` | Ceiling for parent wire notional, except verified reduce-only closes. |
 | `HL_DEXES` | no | `xyz` | Comma-separated HIP-3 DEX names. Main perps are always included. |
 | `HL_API_URL` | no | `https://api.hyperliquid.xyz` | Hyperliquid API base URL. |
@@ -86,11 +87,13 @@ Endpoints:
 - `GET /healthz` — unauthenticated liveness only
 - `POST /mcp` — bearer-authenticated Streamable HTTP
 
-Clients must send:
+Clients must send either configured bearer:
 
 ```http
-Authorization: Bearer YOUR_MCP_AUTH_TOKEN
+Authorization: Bearer YOUR_WRITER_OR_READONLY_TOKEN
 ```
+
+The read-only bearer sees only tools marked read-only in `tools/list`. The server rejects any other tool call before it reaches a handler or writes an audit row.
 
 The server supports the current stateless MCP protocol and legacy initialization clients from the same endpoint.
 
@@ -104,7 +107,7 @@ The server supports the current stateless MCP protocol and legacy initialization
 - `unknown`: the network outcome is ambiguous; do not retry blindly
 - `partial`: a parent order may be live while an attached TP/SL failed
 
-The database uses WAL mode and `synchronous=FULL`. Pending rows store the public account venue key, exact nonce, safe request fields, provided CLOIDs, and the unsigned venue action before `/exchange`. The `mutation_fences` table stores the writer-reserved generation and reservation expiry per network/account venue key. Private keys, signatures, and bearer tokens are never stored. Responses are stored locally but omitted from tool output unless `includeResponse` is true.
+The database uses WAL mode and `synchronous=FULL`. Pending rows store the public account venue key, exact nonce, safe request fields, provided CLOIDs, and the unsigned venue action before `/exchange`. The `mutation_fences` table stores the writer-reserved generation and reservation expiry per network/account venue key. Private keys, signatures, and bearer tokens are never stored or logged. Responses are stored locally but omitted from tool output unless `includeResponse` is true.
 
 Run one Fly Machine when using the included single-volume deployment. SQLite is not shared across Machines.
 
@@ -123,6 +126,7 @@ fly secrets set \
   HL_WALLET_ADDRESS=... \
   HL_PRIVATE_KEY=... \
   MCP_AUTH_TOKEN="$(openssl rand -hex 32)" \
+  MCP_READONLY_AUTH_TOKEN="$(openssl rand -hex 32)" \
   MAX_NOTIONAL_USD=3000
 ```
 
@@ -142,7 +146,7 @@ The included `fly.toml` keeps one Machine warm and mounts `hl_mcp_data` at `/dat
 - One reservation may cover leverage followed by placement in one dispatch while unexpired.
 - Cancel tools remain available without an evidence fence.
 - The audit database owns the generation watermark. If it is lost or restored to an older state, treat every writer bearer as compromised: rotate credentials before resuming. Never restore Eve and this writer independently.
-- Shipped example credentials (`GENERATE_AT_LEAST_32_RANDOM_CHARACTERS`, the example private key, the zero address) are rejected at startup.
+- Shipped example credentials, including both bearer placeholders, the example private key, and the zero address, are rejected at startup. Equal writer and read-only tokens are also rejected.
 - `HL_API_URL` must be HTTPS, or plain HTTP only for a numeric loopback endpoint (`127.0.0.1`, `[::1]`).
 - `hl_mutation_contract` attests this enforcement so callers can pin the implementation before trusting it with live orders.
 - Mutation requests are never retried automatically.
@@ -159,7 +163,7 @@ The included `fly.toml` keeps one Machine warm and mounts `hl_mcp_data` at `/dat
 - Secrets are read only from environment variables.
 - In the Fly image, the process fixes root-owned volume permissions and drops permanently to uid/gid `65532` before opening the database or network.
 
-A bearer-token leak can still place losing trades or cancel protection. Treat the token and API wallet key as secrets.
+A leaked writer token can place losing trades or cancel protection. A leaked read-only token exposes account, market, and audit data. Treat both tokens and the API wallet key as secrets.
 
 ## License
 

@@ -7,8 +7,8 @@ Open a private GitHub security advisory. Do not put credentials, wallet addresse
 ## Operator guidance
 
 - Use a restricted Hyperliquid API wallet.
-- Keep `HL_PRIVATE_KEY` and `MCP_AUTH_TOKEN` in a secret manager.
-- Rotate both credentials after suspected exposure.
+- Keep `HL_PRIVATE_KEY`, `MCP_AUTH_TOKEN`, and `MCP_READONLY_AUTH_TOKEN` in a secret manager.
+- Rotate every exposed credential after suspected exposure.
 - Keep `MAX_NOTIONAL_USD` below the largest intended order.
 - Back up the SQLite volume if the audit is important.
 - Treat an `unknown` audit result as possibly executed.

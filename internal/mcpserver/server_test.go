@@ -21,6 +21,39 @@ import (
 
 type fakeAPI struct{}
 
+type mutationCountingAPI struct {
+	fakeAPI
+	calls atomic.Int64
+}
+
+func (api *mutationCountingAPI) SetLeverageWithOptions(
+	ctx context.Context, symbol string, leverage int, options hyperliquid.MutationOptions,
+) (hyperliquid.MutationResult, error) {
+	api.calls.Add(1)
+	return api.fakeAPI.SetLeverageWithOptions(ctx, symbol, leverage, options)
+}
+
+func (api *mutationCountingAPI) PlaceOrderWithOptions(
+	ctx context.Context, params hyperliquid.PlaceOrderParams, options hyperliquid.MutationOptions,
+) (hyperliquid.MutationResult, error) {
+	api.calls.Add(1)
+	return api.fakeAPI.PlaceOrderWithOptions(ctx, params, options)
+}
+
+func (api *mutationCountingAPI) CancelOrderWithOptions(
+	ctx context.Context, id, symbol string, options hyperliquid.MutationOptions,
+) (hyperliquid.MutationResult, error) {
+	api.calls.Add(1)
+	return api.fakeAPI.CancelOrderWithOptions(ctx, id, symbol, options)
+}
+
+func (api *mutationCountingAPI) CancelAllWithOptions(
+	ctx context.Context, symbol string, options hyperliquid.MutationOptions,
+) (hyperliquid.MutationResult, error) {
+	api.calls.Add(1)
+	return api.fakeAPI.CancelAllWithOptions(ctx, symbol, options)
+}
+
 type ambiguousAPI struct{ fakeAPI }
 
 type preSendAuditAPI struct {
@@ -354,6 +387,124 @@ func toolErrorText(t *testing.T, response *mcp.CallToolResult) string {
 		t.Fatalf("tool error content type = %T", response.Content[0])
 	}
 	return content.Text
+}
+
+func TestReadOnlyMCPListsReadsAndRejectsMutationsBeforeAudit(t *testing.T) {
+	store, err := audit.Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	api := &mutationCountingAPI{}
+	toolServer := New(api, store)
+	handler := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return toolServer.ReadOnlyMCP() },
+		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+	)
+	httpServer := httptest.NewServer(handler)
+	defer httpServer.Close()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "read-only-test", Version: "1"}, nil)
+	session, err := client.Connect(
+		context.Background(),
+		&mcp.StreamableClientTransport{Endpoint: httpServer.URL},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReads := map[string]bool{
+		"hl_account_identity":  true,
+		"hl_balance":           true,
+		"hl_positions":         true,
+		"hl_ticker":            true,
+		"hl_search_markets":    true,
+		"hl_open_orders":       true,
+		"hl_order_book":        true,
+		"hl_candles":           true,
+		"hl_user_fills":        true,
+		"hl_order_history":     true,
+		"hl_order_status":      true,
+		"hl_funding_history":   true,
+		"hl_user_funding":      true,
+		"hl_predicted_funding": true,
+		"hl_portfolio":         true,
+		"hl_fees":              true,
+		"hl_rate_limit":        true,
+		"hl_spot_balances":     true,
+		"hl_active_asset_data": true,
+		"hl_mutation_contract": true,
+		"hl_get_trades":        true,
+	}
+	if len(listed.Tools) != len(wantReads) {
+		t.Fatalf("read-only tools = %d, want %d", len(listed.Tools), len(wantReads))
+	}
+	for _, tool := range listed.Tools {
+		if !wantReads[tool.Name] {
+			t.Fatalf("read-only list exposed %q", tool.Name)
+		}
+		if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+			t.Fatalf("read-only tool %q annotations = %+v", tool.Name, tool.Annotations)
+		}
+		delete(wantReads, tool.Name)
+	}
+	if len(wantReads) != 0 {
+		t.Fatalf("read-only list is missing %v", wantReads)
+	}
+
+	balance, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "hl_balance", Arguments: map[string]any{},
+	})
+	if err != nil || balance.IsError {
+		t.Fatalf("read-only balance = %+v, err = %v", balance, err)
+	}
+
+	assertDenied := func(name string, arguments map[string]any) {
+		t.Helper()
+		response, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: name, Arguments: arguments,
+		})
+		if err != nil {
+			t.Fatalf("%s returned protocol error: %v", name, err)
+		}
+		if text := toolErrorText(t, response); !strings.Contains(text, "read-only credential") {
+			t.Fatalf("%s error = %q", name, text)
+		}
+	}
+
+	fenceExpiresAtMs := futureFenceExpiration()
+	assertDenied("hl_reserve_fence", map[string]any{"fenceExpiresAtMs": fenceExpiresAtMs})
+	generation, reservedExpiresAtMs := reserveFenceForTest(t, toolServer)
+	if generation != 1 {
+		t.Fatalf("writer reservation generation = %d, want 1 after denied read-only reservation", generation)
+	}
+	assertDenied("hl_set_leverage", map[string]any{
+		"symbol": "BTC/USDC:USDC", "leverage": 5,
+		"fenceGeneration": generation, "fenceExpiresAtMs": reservedExpiresAtMs,
+	})
+	assertDenied("hl_place_order", map[string]any{
+		"symbol": "BTC/USDC:USDC", "side": "buy", "amount": 0.1, "price": 100,
+		"fenceGeneration": generation, "fenceExpiresAtMs": reservedExpiresAtMs,
+	})
+	assertDenied("hl_cancel_order", map[string]any{"id": "1", "symbol": "BTC/USDC:USDC"})
+	assertDenied("hl_cancel_all", map[string]any{"symbol": "BTC/USDC:USDC"})
+
+	if calls := api.calls.Load(); calls != 0 {
+		t.Fatalf("read-only credential reached %d mutation API calls", calls)
+	}
+	events, err := store.List(context.Background(), audit.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("read-only mutations wrote audit events: %+v", events)
+	}
 }
 
 func TestLatestProtocolAndAuditTool(t *testing.T) {

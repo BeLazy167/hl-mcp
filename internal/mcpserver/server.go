@@ -51,6 +51,7 @@ type Server struct {
 	hl               hyperliquidAPI
 	audit            *audit.Store
 	mcp              *mcp.Server
+	readOnlyMCP      *mcp.Server
 	fencedMutationMu sync.Mutex
 }
 
@@ -186,36 +187,42 @@ type getTradesInput struct {
 func New(hl hyperliquidAPI, auditStore *audit.Store) *Server {
 	server := &Server{hl: hl, audit: auditStore}
 	server.mcp = mcp.NewServer(&mcp.Implementation{Name: "hl-mcp", Version: version}, nil)
-	server.registerTools()
+	server.registerTools(server.mcp, true)
+	server.readOnlyMCP = mcp.NewServer(&mcp.Implementation{Name: "hl-mcp", Version: version}, nil)
+	readOnlyTools := server.registerTools(server.readOnlyMCP, false)
+	server.readOnlyMCP.AddReceivingMiddleware(enforceReadOnlyCalls(readOnlyTools))
 	return server
 }
 
 func (s *Server) MCP() *mcp.Server { return s.mcp }
 
-func (s *Server) registerTools() {
-	mcp.AddTool(s.mcp, readTool(
+func (s *Server) ReadOnlyMCP() *mcp.Server { return s.readOnlyMCP }
+
+func (s *Server) registerTools(server *mcp.Server, includeMutations bool) map[string]struct{} {
+	readTools := make(map[string]struct{})
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_account_identity", "Account identity",
 		"Current signer-to-funded-account authorization and network from userRole. Returns public identity only.",
 		objectSchema(nil),
 	), s.accountIdentity)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_balance", "Hyperliquid balance",
 		"Account USDC balance (free/used/total). On a unified account this is the spot collateral backing perps.",
 		objectSchema(nil),
 	), s.balance)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_positions", "Open positions",
 		"Open Hyperliquid positions with size, entry, liquidation price and unrealised PnL.",
 		objectSchema(nil),
 	), s.positions)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_ticker", "Price quote",
 		"Last/bid/ask for one market. Perp symbols look like BTC/USDC:USDC. Non-crypto instruments use an XYZ- prefix, e.g. XYZ-GOLD/USDC:USDC.",
 		objectSchema(map[string]any{
 			"symbol": stringSchema("e.g. BTC/USDC:USDC or XYZ-GOLD/USDC:USDC"),
 		}, "symbol"),
 	), s.ticker)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_search_markets", "Search markets",
 		"Find configured tradable symbols by substring. Non-crypto instruments such as GOLD, SILVER, BRENTOIL, and SP500 use the XYZ- prefix.",
 		objectSchema(map[string]any{
@@ -223,12 +230,12 @@ func (s *Server) registerTools() {
 			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 25},
 		}, "query"),
 	), s.searchMarkets)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_open_orders", "Open orders",
 		"Resting orders, optionally filtered to one symbol. Unfiltered reads query every configured DEX.",
 		objectSchema(map[string]any{"symbol": stringSchema("")}),
 	), s.openOrders)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_order_book", "Order book",
 		"Read up to 20 bid and ask levels for one configured market.",
 		objectSchema(map[string]any{
@@ -237,7 +244,7 @@ func (s *Server) registerTools() {
 			"mantissa": map[string]any{"type": "integer", "enum": []int{1, 2, 5}, "description": "requires nSigFigs=5"},
 		}, "symbol"),
 	), s.orderBook)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_candles", "Candles",
 		"Read one bounded page of OHLCV candles for a configured market. Hyperliquid retains the latest 5000 candles.",
 		objectSchema(map[string]any{
@@ -248,7 +255,7 @@ func (s *Server) registerTools() {
 			"limit":     limitSchema(5000, 500),
 		}, "symbol", "interval", "startTime", "endTime"),
 	), s.candles)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_user_fills", "User fills",
 		"Read recent fills for the configured account. Supply startTime for a bounded time-range request.",
 		objectSchema(map[string]any{
@@ -258,19 +265,19 @@ func (s *Server) registerTools() {
 			"limit":           limitSchema(2000, 100),
 		}),
 	), s.userFills)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_order_history", "Order history",
 		"Read the configured account's most recent historical orders.",
 		objectSchema(map[string]any{"limit": limitSchema(2000, 100)}),
 	), s.orderHistory)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_order_status", "Order status",
 		"Read one order by exchange order ID or 16-byte client order ID.",
 		objectSchema(map[string]any{
 			"id": map[string]any{"type": "string", "pattern": `^(?:[0-9]+|0x[0-9a-fA-F]{32})$`},
 		}, "id"),
 	), s.orderStatus)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_funding_history", "Funding history",
 		"Read one bounded page of public funding rates for a configured market.",
 		objectSchema(map[string]any{
@@ -280,7 +287,7 @@ func (s *Server) registerTools() {
 			"limit":     limitSchema(500, 100),
 		}, "symbol", "startTime"),
 	), s.fundingHistory)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_user_funding", "User funding",
 		"Read one bounded page of funding payments for the configured account.",
 		objectSchema(map[string]any{
@@ -289,42 +296,42 @@ func (s *Server) registerTools() {
 			"limit":     limitSchema(500, 100),
 		}, "startTime"),
 	), s.userFunding)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_predicted_funding", "Predicted funding",
 		"Read cross-venue funding forecasts for main perpetuals. Optionally filter by one main-DEX symbol.",
 		objectSchema(map[string]any{"symbol": stringSchema("main perpetual symbol")}),
 	), s.predictedFunding)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_portfolio", "Portfolio history",
 		"Read portfolio value, PnL, and volume periods for the configured account.",
 		objectSchema(nil),
 	), s.portfolio)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_fees", "Fee schedule",
 		"Read fee rates and volume data for the configured account.",
 		objectSchema(nil),
 	), s.fees)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_rate_limit", "Rate-limit usage",
 		"Read action-rate-limit usage for the configured account.",
 		objectSchema(nil),
 	), s.rateLimit)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_spot_balances", "Spot balances",
 		"Read all token balances for the configured account. This is authoritative for unified accounts.",
 		objectSchema(nil),
 	), s.spotBalances)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_active_asset_data", "Active asset data",
 		"Read current leverage, mark price, available size, and maximum trade sizes for one market.",
 		objectSchema(map[string]any{"symbol": stringSchema("configured perpetual symbol")}, "symbol"),
 	), s.activeAssetData)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_mutation_contract", "Mutation contract",
 		"Attest the enforced mutation contract: writer-reserved generations, exact-current fence validation, signed Hyperliquid expiresAfter, a five-minute reservation horizon, and a cross-process send lock. Read-only.",
 		objectSchema(nil),
 	), s.mutationContract)
-	mcp.AddTool(s.mcp, mutationTool(
+	registerTool(server, includeMutations, readTools, mutationTool(
 		"hl_reserve_fence", "Reserve mutation fence",
 		"Reserve the next writer-owned mutation generation for this account. This non-idempotent call fences every older generation. The expiry must be within five minutes. ownerGeneration is optional audit metadata and never selects the reserved generation.",
 		objectSchema(map[string]any{
@@ -332,7 +339,7 @@ func (s *Server) registerTools() {
 			"ownerGeneration":  ownerGenerationSchema(),
 		}, "fenceExpiresAtMs"), false,
 	), s.reserveFence)
-	mcp.AddTool(s.mcp, mutationTool(
+	registerTool(server, includeMutations, readTools, mutationTool(
 		"hl_set_leverage", "Set leverage", "Set cross leverage for a symbol before opening a position. Requires the exact current writer-reserved fence and its unexpired reservation deadline.",
 		objectSchema(map[string]any{
 			"symbol":           stringSchema(""),
@@ -341,20 +348,20 @@ func (s *Server) registerTools() {
 			"fenceExpiresAtMs": fenceExpirationSchema(),
 		}, "symbol", "leverage", "fenceGeneration", "fenceExpiresAtMs"), false,
 	), s.setLeverage)
-	mcp.AddTool(s.mcp, mutationTool(
+	registerTool(server, includeMutations, readTools, mutationTool(
 		"hl_place_order", "Place order",
 		"Place a limit or market order with the exact current writer-reserved fence and its unexpired reservation deadline, optionally attaching stop-loss and take-profit in one signed action. Omit price for market. Child limit prices are explicit execution bounds; when omitted, the server derives a documented 5% bound from the formatted trigger. Attached orders require their matching client order IDs. MAX_NOTIONAL_USD uses the parent wire price; only verified reduce-only closes may exceed it.",
 		placeOrderSchema(), false,
 	), s.placeOrder)
-	mcp.AddTool(s.mcp, mutationTool(
+	registerTool(server, includeMutations, readTools, mutationTool(
 		"hl_cancel_order", "Cancel order", "Cancel one resting order by id.",
 		objectSchema(map[string]any{"id": stringSchema(""), "symbol": stringSchema("")}, "id", "symbol"), true,
 	), s.cancelOrder)
-	mcp.AddTool(s.mcp, mutationTool(
+	registerTool(server, includeMutations, readTools, mutationTool(
 		"hl_cancel_all", "Cancel all orders", "Cancel every resting order on one symbol.",
 		objectSchema(map[string]any{"symbol": stringSchema("")}, "symbol"), false,
 	), s.cancelAll)
-	mcp.AddTool(s.mcp, readTool(
+	registerTool(server, includeMutations, readTools, readTool(
 		"hl_get_trades", "Trade audit log",
 		"Read the local SQLite audit log of MCP trade mutations, including reconciliation identity. Results are newest first.",
 		objectSchema(map[string]any{
@@ -366,6 +373,7 @@ func (s *Server) registerTools() {
 			"includeResponse": map[string]any{"type": "boolean", "default": false},
 		}),
 	), s.getTrades)
+	return readTools
 }
 
 func (s *Server) accountIdentity(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, any, error) {
@@ -847,6 +855,44 @@ func joinAuditError(actionErr, auditErr error) error {
 func addAuditWarning(result map[string]any, err error) {
 	if err != nil {
 		result["auditWarning"] = err.Error()
+	}
+}
+
+func registerTool[In, Out any](
+	server *mcp.Server,
+	includeMutations bool,
+	readTools map[string]struct{},
+	tool *mcp.Tool,
+	handler mcp.ToolHandlerFor[In, Out],
+) {
+	readOnly := tool.Annotations != nil && tool.Annotations.ReadOnlyHint
+	if !readOnly && !includeMutations {
+		return
+	}
+	if readOnly {
+		readTools[tool.Name] = struct{}{}
+	}
+	mcp.AddTool(server, tool, handler)
+}
+
+func enforceReadOnlyCalls(readTools map[string]struct{}) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+			if method == "tools/call" {
+				call, ok := request.(*mcp.CallToolRequest)
+				if ok && call.Params != nil {
+					if _, allowed := readTools[call.Params.Name]; !allowed {
+						return &mcp.CallToolResult{
+							IsError: true,
+							Content: []mcp.Content{&mcp.TextContent{
+								Text: "error: read-only credential may call read tools only",
+							}},
+						}, nil
+					}
+				}
+			}
+			return next(ctx, method, request)
+		}
 	}
 }
 

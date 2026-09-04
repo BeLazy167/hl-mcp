@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"math"
@@ -20,15 +22,16 @@ const (
 )
 
 type Config struct {
-	WalletAddress string
-	PrivateKey    string
-	AuthToken     string
-	APIURL        string
-	DEXes         []string
-	DBPath        string
-	MaxNotional   float64
-	Port          int
-	HTTPTimeout   time.Duration
+	WalletAddress     string
+	PrivateKey        string
+	AuthToken         string
+	ReadOnlyAuthToken string
+	APIURL            string
+	DEXes             []string
+	DBPath            string
+	MaxNotional       float64
+	Port              int
+	HTTPTimeout       time.Duration
 }
 
 var placeholderSecretMarkers = []string{
@@ -48,17 +51,34 @@ func isPlaceholderSecret(value string) bool {
 	return false
 }
 
+func validateAuthToken(name, value string) error {
+	if len(value) < 32 {
+		return fmt.Errorf("%s must contain at least 32 characters", name)
+	}
+	if isPlaceholderSecret(value) {
+		return fmt.Errorf("%s must be a generated secret; shipped example values are rejected", name)
+	}
+	return nil
+}
+
+func secretsEqual(left, right string) bool {
+	leftHash := sha256.Sum256([]byte(left))
+	rightHash := sha256.Sum256([]byte(right))
+	return subtle.ConstantTimeCompare(leftHash[:], rightHash[:]) == 1
+}
+
 func Load() (Config, error) {
 	cfg := Config{
-		WalletAddress: strings.TrimSpace(os.Getenv("HL_WALLET_ADDRESS")),
-		PrivateKey:    strings.TrimSpace(os.Getenv("HL_PRIVATE_KEY")),
-		AuthToken:     strings.TrimSpace(os.Getenv("MCP_AUTH_TOKEN")),
-		APIURL:        envOr("HL_API_URL", defaultAPIURL),
-		DEXes:         parseDEXes(envOr("HL_DEXES", "xyz")),
-		DBPath:        envOr("DB_PATH", defaultDBPath),
-		MaxNotional:   defaultMaxNotional,
-		Port:          defaultPort,
-		HTTPTimeout:   defaultHTTPTimeout,
+		WalletAddress:     strings.TrimSpace(os.Getenv("HL_WALLET_ADDRESS")),
+		PrivateKey:        strings.TrimSpace(os.Getenv("HL_PRIVATE_KEY")),
+		AuthToken:         strings.TrimSpace(os.Getenv("MCP_AUTH_TOKEN")),
+		ReadOnlyAuthToken: strings.TrimSpace(os.Getenv("MCP_READONLY_AUTH_TOKEN")),
+		APIURL:            envOr("HL_API_URL", defaultAPIURL),
+		DEXes:             parseDEXes(envOr("HL_DEXES", "xyz")),
+		DBPath:            envOr("DB_PATH", defaultDBPath),
+		MaxNotional:       defaultMaxNotional,
+		Port:              defaultPort,
+		HTTPTimeout:       defaultHTTPTimeout,
 	}
 
 	var missing []string
@@ -69,6 +89,7 @@ func Load() (Config, error) {
 		{"HL_WALLET_ADDRESS", cfg.WalletAddress},
 		{"HL_PRIVATE_KEY", cfg.PrivateKey},
 		{"MCP_AUTH_TOKEN", cfg.AuthToken},
+		{"MCP_READONLY_AUTH_TOKEN", cfg.ReadOnlyAuthToken},
 	} {
 		if item.value == "" {
 			missing = append(missing, item.name)
@@ -77,11 +98,14 @@ func Load() (Config, error) {
 	if len(missing) != 0 {
 		return Config{}, fmt.Errorf("required environment variables missing: %s", strings.Join(missing, ", "))
 	}
-	if len(cfg.AuthToken) < 32 {
-		return Config{}, errors.New("MCP_AUTH_TOKEN must contain at least 32 characters")
+	if err := validateAuthToken("MCP_AUTH_TOKEN", cfg.AuthToken); err != nil {
+		return Config{}, err
 	}
-	if isPlaceholderSecret(cfg.AuthToken) {
-		return Config{}, errors.New("MCP_AUTH_TOKEN must be a generated secret; shipped example values are rejected")
+	if err := validateAuthToken("MCP_READONLY_AUTH_TOKEN", cfg.ReadOnlyAuthToken); err != nil {
+		return Config{}, err
+	}
+	if secretsEqual(cfg.AuthToken, cfg.ReadOnlyAuthToken) {
+		return Config{}, errors.New("MCP_AUTH_TOKEN and MCP_READONLY_AUTH_TOKEN must differ")
 	}
 	if isPlaceholderSecret(cfg.PrivateKey) {
 		return Config{}, errors.New("HL_PRIVATE_KEY must be a generated secret; shipped example values are rejected")
