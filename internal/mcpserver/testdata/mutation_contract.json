@@ -1,0 +1,17 @@
+{
+  "contractVersion": 2,
+  "fence": {
+    "reservationTool": "hl_reserve_fence",
+    "generationField": "fenceGeneration",
+    "expiryField": "fenceExpiresAtMs",
+    "maxExpirationMs": 300000,
+    "signedExpiresAfter": true,
+    "writerOwnedGenerations": true,
+    "exactCurrentGenerationRequired": true,
+    "crossProcessSendLock": true
+  },
+  "mutationTools": [
+    "hl_set_leverage",
+    "hl_place_order"
+  ]
+}

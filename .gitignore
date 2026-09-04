@@ -1,0 +1,20 @@
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Build and test artifacts
+bin/
+dist/
+coverage.out
+*.prof
+*.test
+*.log
+
+# Local SQLite files
+data/
+*.db
+*.db-shm
+*.db-wal
+
+.DS_Store
