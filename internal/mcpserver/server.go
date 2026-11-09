@@ -919,7 +919,7 @@ func placeOrderSchema() map[string]any {
 			"type": "string", "pattern": `^0x[0-9a-fA-F]{32}$`, "description": description,
 		}
 	}
-	schema := objectSchema(map[string]any{
+	return objectSchema(map[string]any{
 		"symbol":   stringSchema(""),
 		"side":     map[string]any{"type": "string", "enum": []string{"buy", "sell"}},
 		"amount":   map[string]any{"type": "number", "exclusiveMinimum": 0},
@@ -941,33 +941,6 @@ func placeOrderSchema() map[string]any {
 		"fenceGeneration":         fenceGenerationSchema(),
 		"fenceExpiresAtMs":        fenceExpirationSchema(),
 	}, "symbol", "side", "amount", "fenceGeneration", "fenceExpiresAtMs")
-	schema["allOf"] = []any{
-		map[string]any{
-			"if":   map[string]any{"required": []string{"takeProfit"}},
-			"then": map[string]any{"required": []string{"takeProfitClientOrderId"}},
-		},
-		map[string]any{
-			"if":   map[string]any{"required": []string{"takeProfitClientOrderId"}},
-			"then": map[string]any{"required": []string{"takeProfit"}},
-		},
-		map[string]any{
-			"if":   map[string]any{"required": []string{"takeProfitLimitPrice"}},
-			"then": map[string]any{"required": []string{"takeProfit"}},
-		},
-		map[string]any{
-			"if":   map[string]any{"required": []string{"stopLoss"}},
-			"then": map[string]any{"required": []string{"stopLossClientOrderId"}},
-		},
-		map[string]any{
-			"if":   map[string]any{"required": []string{"stopLossClientOrderId"}},
-			"then": map[string]any{"required": []string{"stopLoss"}},
-		},
-		map[string]any{
-			"if":   map[string]any{"required": []string{"stopLossLimitPrice"}},
-			"then": map[string]any{"required": []string{"stopLoss"}},
-		},
-	}
-	return schema
 }
 
 func objectSchema(properties map[string]any, required ...string) map[string]any {
